@@ -1,0 +1,15 @@
+profiles:
+  - coding
+
+commands:
+  test: python3 test.py
+
+artifacts:
+  - test.py
+
+verification:
+  required_commands:
+    - test
+  required_artifacts:
+    - test.py
+
