@@ -1,8 +1,11 @@
 profiles:
   - coding
+  - review
 
 commands:
   test: python3 hello.py
+  build: echo "no build step"
+  review_checks: python3 hello.py
 
 artifacts:
   - hello.py
