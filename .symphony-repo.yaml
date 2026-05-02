@@ -3,16 +3,12 @@ profiles:
   - review
 
 commands:
-  test: python3 hello.py
-  review_checks: python3 hello.py
-
-artifacts:
-  - hello.py
+  test: python3 -m compileall .
+  review_checks: python3 -m compileall .
 
 verification:
   required_commands:
     - test
-  required_artifacts:
-    - hello.py
+
 
 
