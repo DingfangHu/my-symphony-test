@@ -3,15 +3,30 @@
 photosphere_spectrum.py
 
 Compute the photosphere radiation spectrum based on the Deng & Zhang (2014)
-fireball model under the simplest assumptions:
+fireball model using the δ-function-reduced single-integral formalism
+(DZ14 Eq.7).
 
-  - Impulsive Injection (single shell injected at t=0)
-  - Outer Boundary at Infinity (unbounded ejecta)
-  - Blackbody Distribution of Photons (Planckian in the comoving frame)
+The δ-function constraint
+    t_obs = r · (1 − β μ) / (β c (1+z))
+is used to eliminate the μ = cosθ variable analytically, collapsing the
+(r, μ) double integral into a single r-integral over [r_min, r_max] where
+|μ_r| ≤ 1:
 
-The script calculates the observed flux density F_nu (in mJy) as a function
-of frequency (in Hz), prints the data in two columns, and saves a log-log
-spectral plot as photosphere_spectrum.png.
+    F_ν(t_obs) ∝ ∫ dr  P(r) · P_ν(ν'(r), T'(r)) / r
+
+with
+    μ_r(r) = (1 − t_obs·β c·(1+z) / r) / β          (δ-function root)
+    ν'(r)  = ν_obs · (1+z) · (1 − β μ_r(r))         (comoving frequency)
+    T'(r)  = T'_ph · (r / r_ph)^{−2/3}              (adiabatic cooling)
+    P(r)   ∝ r^{−2} · exp(−r_ph / r)               (last-scattering PDF)
+
+The r-integral is evaluated numerically via scipy.integrate.quad.
+The output captures the non-Planckian low-energy slope (ν or ν² power-law
+from Doppler-boost superposition) and the steepened high-energy tail from
+adiabatic cooling.
+
+The script prints frequency (Hz) and flux density F_nu (mJy) in two columns,
+and saves a log-log spectral plot as photosphere_spectrum.png.
 
 Reference: Deng & Zhang (2014), ApJ, 783, L35
 """
@@ -20,6 +35,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from scipy.integrate import quad
 
 # ---------------------------------------------------------------------------
 # Physical constants (CGS units: cm, g, s, erg, K)
@@ -62,67 +78,170 @@ r_sat = ETA * R0
 #    L = 4π r_ph^2 · a T'_ph^4 · η^2 · c   (energy-flux conservation)
 #    ⇒  T'_ph = [L / (4π r_ph^2 a η^2 c)]^{1/4}
 # ---------------------------------------------------------------------------
-t_comoving = (L_ISO / (4.0 * np.pi * r_ph**2 * A_RAD * ETA**2 * C_LIGHT))**0.25
+T_ph = (L_ISO / (4.0 * np.pi * r_ph**2 * A_RAD * ETA**2 * C_LIGHT))**0.25
 
 # ---------------------------------------------------------------------------
-# 4. Characteristic (peak) frequency in the observer frame
-#    ν_char = 2 η k T'_ph / (h (1+z))
-#    where 2η ≈ D is the on-axis Doppler factor for Γ ≫ 1.
-#    The factor (1+z) accounts for cosmological redshift.
+# 4. Shell speed β derived from the terminal Lorentz factor η
 # ---------------------------------------------------------------------------
-nu_char = 2.0 * ETA * K_BOLTZ * t_comoving / (H_PLANCK * (1.0 + REDSHIFT))
+beta = np.sqrt(1.0 - 1.0 / ETA**2)
 
 # ---------------------------------------------------------------------------
-# 5. Normalisation prefactor for the flux density
-#    F_ν = C_norm · ν^3 / [exp(ν / ν_char) - 1]
-#    C_norm = (r_ph / D_L)^2 · 2π h (1+z)^3 / c^2
+# 5. Observer time t_obs
+#    Choose t_obs so that r_ph lies near the geometric mean of the
+#    integration limits → t_obs = r_ph / (η · c · (1+z)).
 # ---------------------------------------------------------------------------
-c_norm = (r_ph / D_LUM)**2 * 2.0 * np.pi * H_PLANCK * (1.0 + REDSHIFT)**3 / C_LIGHT**2
+t_obs = r_ph / (ETA * C_LIGHT * (1.0 + REDSHIFT))
 
 # ---------------------------------------------------------------------------
-# 6. Frequency grid  (log-spaced, spanning the observable spectrum)
+# 6. Integration limits from the kinematic constraint |μ_r| ≤ 1
+#    μ_r(r) = (1 − t_obs·β c·(1+z) / r) / β
+#    μ_r ≥ -1  ⇒  r ≥ t_obs·β c·(1+z) / (1+β)  =: r_min
+#    μ_r ≤ +1  ⇒  r ≤ t_obs·β c·(1+z) / (1−β)  =: r_max
+# ---------------------------------------------------------------------------
+r_min = t_obs * beta * C_LIGHT * (1.0 + REDSHIFT) / (1.0 + beta)
+r_max = t_obs * beta * C_LIGHT * (1.0 + REDSHIFT) / (1.0 - beta)
+
+# ---------------------------------------------------------------------------
+# 7. δ-function root — direction cosine μ as a function of radius
+#    μ_r(r) = (1 − t_obs·β c·(1+z) / r) / β
+# ---------------------------------------------------------------------------
+def mu_r(r):
+    """Direction cosine μ = cosθ at radius r from the δ-function constraint."""
+    return (1.0 - t_obs * beta * C_LIGHT * (1.0 + REDSHIFT) / r) / beta
+
+
+# ---------------------------------------------------------------------------
+# 8. Comoving frequency ν'(r) seen by a shell element at radius r
+#    ν'(r) = ν_obs · (1+z) · (1 − β μ_r(r))
+#    Substituting μ_r:
+#      ν'(r) = ν_obs · t_obs · β c · (1+z)^2 / r
+# ---------------------------------------------------------------------------
+def nu_comoving(r, nu_obs):
+    """Comoving-frame frequency [Hz] at radius r."""
+    mu = mu_r(r)
+    return nu_obs * (1.0 + REDSHIFT) * (1.0 - beta * mu)
+
+
+# ---------------------------------------------------------------------------
+# 9. Comoving temperature — adiabatic cooling T'(r) ∝ r^{−2/3}
+#    In the radiation-dominated coasting phase the comoving temperature
+#    drops as the fireball expands.
+# ---------------------------------------------------------------------------
+def temperature_comoving(r):
+    """Comoving temperature [K] at radius r (adiabatic cooling)."""
+    return T_ph * (r / r_ph)**(-2.0 / 3.0)
+
+
+# ---------------------------------------------------------------------------
+# 10. Probability density of last scattering at radius r
+#     In the coasting phase (r > r_s) with τ(r) = r_ph / r:
+#     P(r) = |dτ/dr| · exp(−τ) = (r_ph / r^2) · exp(−r_ph / r)
+# ---------------------------------------------------------------------------
+def P_last_scattering(r):
+    """Unnormalised probability density of last scattering at radius r."""
+    exponent = -r_ph / max(r, 1e-3 * r_ph)
+    if not np.isfinite(exponent):
+        return 0.0
+    return r_ph / r**2 * np.exp(exponent)
+
+
+# ---------------------------------------------------------------------------
+# 11. Planck function (specific intensity) in the comoving frame
+#     B_ν(ν, T) = (2 h ν^3 / c^2) / (exp(h ν / k T) − 1)   [erg/s/cm^2/Hz/sr]
+# ---------------------------------------------------------------------------
+def planck_nu(nu, T):
+    """Planck specific intensity [erg/s/cm^2/Hz/sr] at frequency ν, temperature T."""
+    if nu <= 0.0 or T <= 0.0:
+        return 0.0
+    x = H_PLANCK * nu / (K_BOLTZ * T)
+    if x > 700.0:
+        return 0.0
+    return (2.0 * H_PLANCK * nu**3 / C_LIGHT**2) / np.expm1(x)
+
+
+# ---------------------------------------------------------------------------
+# 12. Integrand for the δ-function-reduced single r-integral
+#     integrand(r) = P(r) · B_ν(ν'(r), T'(r)) / r
+#     The factor 1/r comes from the Jacobian |dt_obs/dμ|^{-1} = c(1+z)/r
+#     of the δ-function transformation.
+# ---------------------------------------------------------------------------
+def integrand(r, nu_obs):
+    """Integrand for the δ-reduced r-integral at observed frequency nu_obs [Hz]."""
+    if r < r_min or r > r_max:
+        return 0.0
+    nup = nu_comoving(r, nu_obs)
+    T_l = temperature_comoving(r)
+    P_r = P_last_scattering(r)
+    B = planck_nu(nup, T_l)
+    if B <= 0.0 or P_r <= 0.0:
+        return 0.0
+    return P_r * B / r
+
+
+# ---------------------------------------------------------------------------
+# 13. Frequency grid  (log-spaced, spanning the observable spectrum)
 # ---------------------------------------------------------------------------
 N_POINTS = 500
-nu_min = nu_char * 1.0e-3
-nu_max = nu_char * 1.0e2
+# Estimate the characteristic frequency for grid bounds
+nu_char_est = 2.0 * ETA * K_BOLTZ * T_ph / (H_PLANCK * (1.0 + REDSHIFT))
+nu_min = nu_char_est * 1.0e-3
+nu_max = nu_char_est * 1.0e2
 nu_grid = np.logspace(np.log10(nu_min), np.log10(nu_max), N_POINTS)
 
 # ---------------------------------------------------------------------------
-# 7. Flux density calculation
+# 14. Flux density calculation — numerical 1D integration
+#     For each frequency, integrate over radius using scipy.integrate.quad.
 # ---------------------------------------------------------------------------
-exponent = nu_grid / nu_char
-# Avoid overflow for very large arguments
-with np.errstate(over="ignore"):
-    f_nu_cgs = c_norm * nu_grid**3 / (np.exp(exponent) - 1.0)
+print("# Computing δ-reduced single-integral photosphere spectrum ...", flush=True)
 
-# Convert to mJy
+f_nu_raw = np.zeros(N_POINTS)
+for i, nu in enumerate(nu_grid):
+    result, _ = quad(integrand, r_min, r_max, args=(nu,),
+                     limit=200, epsabs=1e-60, epsrel=1e-6)
+    f_nu_raw[i] = max(result, 0.0)
+
+# -- Normalisation ---------------------------------------------------------
+# Scale the raw integral so that the bolometric flux matches the isotropic
+# equivalent luminosity:  ∫ F_ν dν ≈ L_ISO / (4π d_L^2 (1+z)).
+# Use trapezoidal integration over the log-spaced grid.
+bol_raw = np.trapezoid(f_nu_raw, nu_grid)
+F_bol_expected = L_ISO / (4.0 * np.pi * D_LUM**2 * (1.0 + REDSHIFT))
+norm_factor = F_bol_expected / bol_raw if bol_raw > 0 else 1.0
+
+f_nu_cgs = f_nu_raw * norm_factor
 f_nu_mjy = f_nu_cgs / MJY_TO_CGS
 
 # ---------------------------------------------------------------------------
-# 8. Print two-column output: frequency (Hz)  F_nu (mJy)
+# 15. Characteristic frequency from the integrated spectrum (peak of F_ν)
 # ---------------------------------------------------------------------------
-print("# photosphere_spectrum.py  —  Deng & Zhang (2014) impulsive-injection model")
+idx_peak = np.argmax(f_nu_mjy)
+nu_char = nu_grid[idx_peak]
+
+# ---------------------------------------------------------------------------
+# 16. Print two-column output: frequency (Hz)  F_nu (mJy)
+# ---------------------------------------------------------------------------
+print("# photosphere_spectrum.py  —  Deng & Zhang (2014) δ-reduced single-integral model")
 print("# frequency (Hz)    F_nu (mJy)")
 for nu, fnu in zip(nu_grid, f_nu_mjy):
     print(f"{nu:.6e}  {fnu:.6e}")
 
 # ---------------------------------------------------------------------------
-# 9. Plot log-log spectrum and save as photosphere_spectrum.png
+# 17. Plot log-log spectrum and save as photosphere_spectrum.png
 # ---------------------------------------------------------------------------
 fig, ax = plt.subplots(figsize=(8, 5))
 
-ax.loglog(nu_grid, f_nu_mjy, "b-", linewidth=1.2, label="Photosphere spectrum")
+ax.loglog(nu_grid, f_nu_mjy, "b-", linewidth=1.2,
+          label="δ-reduced photosphere spectrum")
 
-# Mark the characteristic frequency
-idx_peak = np.argmax(f_nu_mjy)
-ax.axvline(nu_grid[idx_peak], color="red", linestyle="--", alpha=0.6,
-           label=f"ν_char ≈ {nu_char:.2e} Hz")
+# Mark the peak frequency
+ax.axvline(nu_char, color="red", linestyle="--", alpha=0.6,
+           label=f"ν_peak ≈ {nu_char:.2e} Hz")
 
 ax.set_xlabel("Frequency ν [Hz]", fontsize=12)
 ax.set_ylabel("Flux density F_ν [mJy]", fontsize=12)
 ax.set_title("Photosphere Radiation Spectrum\n"
-             "Deng & Zhang (2014): Impulsive Injection, "
-             "Outer Boundary at ∞, Blackbody Photons",
+             "Deng & Zhang (2014): δ-Reduced Single Integral "
+             "(Impulsive Injection, ∞ Boundary, Blackbody Photons)",
              fontsize=11)
 ax.legend(fontsize=9)
 ax.grid(True, which="both", alpha=0.25)
@@ -132,15 +251,18 @@ fig.savefig("photosphere_spectrum.png", dpi=150)
 plt.close(fig)
 
 # ---------------------------------------------------------------------------
-# 10. Summary diagnostics (printed to stderr so stdout stays clean)
+# 18. Summary diagnostics (printed to stderr so stdout stays clean)
 # ---------------------------------------------------------------------------
 import sys
 print(f"Photosphere radius:        r_ph = {r_ph:.3e} cm", file=sys.stderr)
 print(f"Saturation radius:         r_s  = {r_sat:.3e} cm", file=sys.stderr)
 print(f"r_ph > r_s?                {r_ph > r_sat}", file=sys.stderr)
-print(f"Comoving temperature:      T'   = {t_comoving:.3e} K  "
-      f"({K_BOLTZ * t_comoving / 1.602e-9:.2f} keV)", file=sys.stderr)
-print(f"Characteristic frequency:  ν_char = {nu_char:.3e} Hz  "
+print(f"Shell speed:               β    = {beta:.6f}", file=sys.stderr)
+print(f"Observer time:             t_obs = {t_obs:.3e} s", file=sys.stderr)
+print(f"Integration limits:        r ∈ [{r_min:.3e}, {r_max:.3e}] cm", file=sys.stderr)
+print(f"Comoving temperature:      T'_ph = {T_ph:.3e} K  "
+      f"({K_BOLTZ * T_ph / 1.602e-9:.2f} keV)", file=sys.stderr)
+print(f"Peak frequency:            ν_peak = {nu_char:.3e} Hz  "
       f"({H_PLANCK * nu_char / 1.602e-9:.2f} keV)", file=sys.stderr)
 print(f"Peak flux density:         F_ν,peak = {f_nu_mjy[idx_peak]:.3e} mJy  "
       f"at ν = {nu_grid[idx_peak]:.3e} Hz", file=sys.stderr)
