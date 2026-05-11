@@ -2,33 +2,36 @@
 """
 photosphere_spectrum.py
 
-Compute the photosphere radiation spectrum based on the Deng & Zhang (2014)
-fireball model using the δ-function-reduced single-integral formalism
-(DZ14 Eq.7).
+Compute the photosphere radiation spectrum based on the Deng & Zhang (2014,
+ApJ, 785, 112) fireball model, Section 3.1, Eq.7 (original model, z=0).
+
+Key physical ingredients:
+  1. Beloborodov (2011) 2D probability density:
+     P(r, μ) ∝ D² · (r_ph/r²) · exp(−r_ph/r)
+     with Doppler factor D(μ) = 1 / [Γ (1 − βμ)].
+  2. Observer-frame temperature (Doppler-boosted from adiabatic cooling):
+     T_obs(r, μ) = T_comoving(r) · D(μ),
+     T_comoving(r) = T_ph · (r / r_ph)^{−2/3}.
+  3. Observer-frame Planck function B_ν(ν_obs, T_obs) — no comoving-frame
+     frequency or temperature is ever substituted into the Planck formula.
+  4. Cosmological redshift is set to zero (as in the original DZ14 §3.1
+     derivation) — no (1+z) factors.
 
 The δ-function constraint
-    t_obs = r · (1 − β μ) / (β c (1+z))
-is used to eliminate the μ = cosθ variable analytically, collapsing the
-(r, μ) double integral into a single r-integral over [r_min, r_max] where
+    t_obs = r · (1 − β μ) / (β c)                    (z = 0)
+eliminates the μ = cosθ variable analytically, reducing the (r, μ) double
+integral of DZ14 Eq.7 to a single r-integral over [r_min, r_max] where
 |μ_r| ≤ 1:
 
-    F_ν(t_obs) ∝ ∫ dr  P(r) · P_ν(ν'(r), T'(r)) / r
-
-with
-    μ_r(r) = (1 − t_obs·β c·(1+z) / r) / β          (δ-function root)
-    ν'(r)  = ν_obs · (1+z) · (1 − β μ_r(r))         (comoving frequency)
-    T'(r)  = T'_ph · (r / r_ph)^{−2/3}              (adiabatic cooling)
-    P(r)   ∝ r^{−2} · exp(−r_ph / r)               (last-scattering PDF)
+    F_ν(t_obs) ∝ ∫ dr  P(r, μ_r) · B_ν(ν_obs, T_obs(r, μ_r)) / r
 
 The r-integral is evaluated numerically via scipy.integrate.quad.
-The output captures the non-Planckian low-energy slope (ν or ν² power-law
-from Doppler-boost superposition) and the steepened high-energy tail from
-adiabatic cooling.
+Output: frequency (Hz) and flux density F_nu (mJy), plus a log-log spectral
+plot saved as photosphere_spectrum.png.
 
-The script prints frequency (Hz) and flux density F_nu (mJy) in two columns,
-and saves a log-log spectral plot as photosphere_spectrum.png.
-
-Reference: Deng & Zhang (2014), ApJ, 783, L35
+References:
+  Deng & Zhang (2014), ApJ, 785, 112, §3.1 Eq.7
+  Beloborodov (2011), ApJ, 737, 68
 """
 
 import sys
@@ -60,19 +63,24 @@ MJY_TO_CGS = 1.0e-26
 L_ISO = 1.0e52          # isotropic-equivalent luminosity [erg/s]
 ETA = 300.0              # dimensionless entropy / terminal Lorentz factor
 R0 = 1.0e7               # base radius of the fireball [cm]
-REDSHIFT = 1.0           # cosmological redshift
-# Luminosity distance for z=1 with standard ΛCDM (H0=70, Ωm=0.3, ΩΛ=0.7)
-D_LUM = 2.04e28          # luminosity distance [cm]  (~ 6.6 Gpc)
+# Redshift is set to 0 following the DZ14 §3.1 original derivation,
+# which ignores redshift effects on frequency and time.
+# When z ≠ 0, insert (1+z) factors in t_obs, ν_obs, and integration limits.
+REDSHIFT = 0.0           # cosmological redshift (z=0 per DZ14 §3.1)
+# Luminosity distance for z=0 — use a nominal nearby distance for illustration.
+# The spectral shape is independent of d_L; only the absolute flux scale depends on it.
+D_LUM = 1.0e28           # luminosity distance [cm]  (~ 3.2 Gpc, nominal)
 
 # NumPy version compatibility for trapezoidal integration
 _trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
 
 
 def main():
-    """Compute the δ-reduced single-integral photosphere spectrum."""
+    """Compute the DZ14 §3.1 photosphere spectrum (Beloborodov 2011 P(r,μ), observer-frame temperature)."""
     # -----------------------------------------------------------------------
     # 1. Photosphere radius  (coasting phase, Γ = η = const)
     #    τ(r_ph) = 1  ⇒  r_ph = L σ_T / (4π m_p c^3 η^3)
+    #    Deng & Zhang (2014) Eq.2
     # -----------------------------------------------------------------------
     r_ph = L_ISO * SIGMA_T / (4.0 * np.pi * M_PROTON * C_LIGHT**3 * ETA**3)
 
@@ -87,79 +95,89 @@ def main():
     #    L = 4π r_ph^2 · a T'_ph^4 · η^2 · c   (energy-flux conservation)
     #    ⇒  T'_ph = [L / (4π r_ph^2 a η^2 c)]^{1/4}
     # -----------------------------------------------------------------------
-    T_ph = (L_ISO / (4.0 * np.pi * r_ph**2 * A_RAD * ETA**2 * C_LIGHT))**0.25
+    T_ph_comoving = (L_ISO / (4.0 * np.pi * r_ph**2 * A_RAD * ETA**2 * C_LIGHT))**0.25
 
     # -----------------------------------------------------------------------
-    # 4. Shell speed β derived from the terminal Lorentz factor η
+    # 4. Shell speed β derived from the terminal Lorentz factor η = Γ
     # -----------------------------------------------------------------------
     beta = np.sqrt(1.0 - 1.0 / ETA**2)
 
     # -----------------------------------------------------------------------
     # 5. Observer time t_obs
-    #    Choose t_obs so that r_ph lies near the geometric mean of the
-    #    integration limits → t_obs = r_ph / (η · c · (1+z)).
+    #    t_obs = r_ph / (η · c)   (z = 0 per DZ14 §3.1 assumption)
     # -----------------------------------------------------------------------
-    t_obs = r_ph / (ETA * C_LIGHT * (1.0 + REDSHIFT))
+    t_obs = r_ph / (ETA * C_LIGHT)
 
     # -----------------------------------------------------------------------
     # 6. Integration limits from the kinematic constraint |μ_r| ≤ 1
-    #    μ_r(r) = (1 − t_obs·β c·(1+z) / r) / β
-    #    μ_r ≥ -1  ⇒  r ≥ t_obs·β c·(1+z) / (1+β)  =: r_min
-    #    μ_r ≤ +1  ⇒  r ≤ t_obs·β c·(1+z) / (1−β)  =: r_max
+    #    μ_r(r) = (1 − t_obs·β c / r) / β
+    #    μ_r ≥ -1  ⇒  r ≥ t_obs·β c / (1+β)  =: r_min
+    #    μ_r ≤ +1  ⇒  r ≤ t_obs·β c / (1−β)  =: r_max
     # -----------------------------------------------------------------------
-    r_min = t_obs * beta * C_LIGHT * (1.0 + REDSHIFT) / (1.0 + beta)
-    r_max = t_obs * beta * C_LIGHT * (1.0 + REDSHIFT) / (1.0 - beta)
-    # Guard: kinematic r_min can fall below r_sat; the integrand
-    # contribution below r_sat is negligible (P(r) ≈ exp(−600) ≈ 0), but
-    # we clamp to the coasting-phase validity range for physical consistency.
+    r_min = t_obs * beta * C_LIGHT / (1.0 + beta)
+    r_max = t_obs * beta * C_LIGHT / (1.0 - beta)
+    # Clamp to coasting-phase validity range.
     r_min = max(r_min, r_sat)
 
     # -----------------------------------------------------------------------
     # 7. δ-function root — direction cosine μ as a function of radius
-    #    μ_r(r) = (1 − t_obs·β c·(1+z) / r) / β
+    #    μ_r(r) = (1 − t_obs·β c / r) / β          (z = 0)
     # -----------------------------------------------------------------------
     def mu_r(r):
-        """Direction cosine μ = cosθ at radius r from the δ-function constraint."""
-        return (1.0 - t_obs * beta * C_LIGHT * (1.0 + REDSHIFT) / r) / beta
+        """Direction cosine μ = cosθ at radius r from the δ-function constraint (z=0)."""
+        return (1.0 - t_obs * beta * C_LIGHT / r) / beta
 
     # -----------------------------------------------------------------------
-    # 8. Comoving frequency ν'(r) seen by a shell element at radius r
-    #    ν'(r) = ν_obs · (1+z) · (1 − β μ_r(r))
-    #    Substituting μ_r:
-    #      ν'(r) = ν_obs · t_obs · β c · (1+z)^2 / r
+    # 8. Doppler factor  D(μ) = 1 / [Γ (1 − β μ)]
+    #    Γ = η in the coasting phase.
+    #    Beloborodov (2011), Eq.(2)
     # -----------------------------------------------------------------------
-    def nu_comoving(r, nu_obs):
-        """Comoving-frame frequency [Hz] at radius r."""
-        mu = mu_r(r)
-        return nu_obs * (1.0 + REDSHIFT) * (1.0 - beta * mu)
+    def doppler_factor(mu):
+        """Doppler factor D(μ) = 1 / [Γ (1 − βμ)]."""
+        return 1.0 / (ETA * (1.0 - beta * mu))
 
     # -----------------------------------------------------------------------
-    # 9. Comoving temperature — adiabatic cooling T'(r) ∝ r^{−2/3}
+    # 9. Comoving temperature — adiabatic cooling T'_comoving(r) ∝ r^{−2/3}
     #    In the radiation-dominated coasting phase the comoving temperature
     #    drops as the fireball expands.
     # -----------------------------------------------------------------------
-    def temperature_comoving(r):
+    def T_comoving(r):
         """Comoving temperature [K] at radius r (adiabatic cooling)."""
-        return T_ph * (r / r_ph)**(-2.0 / 3.0)
+        return T_ph_comoving * (r / r_ph)**(-2.0 / 3.0)
 
     # -----------------------------------------------------------------------
-    # 10. Probability density of last scattering at radius r
-    #     In the coasting phase (r > r_s) with τ(r) = r_ph / r:
-    #     P(r) = |dτ/dr| · exp(−τ) = (r_ph / r^2) · exp(−r_ph / r)
+    # 10. Observer-frame temperature  T_obs(r, μ) = T_comoving(r) · D(μ)
+    #     Temperature transforms as T_obs = T' · D (Doppler boost).
+    #     Deng & Zhang (2014) §3.1 — observer-frame temperature used directly
+    #     in the Planck function with observer-frame frequency.
     # -----------------------------------------------------------------------
-    def P_last_scattering(r):
-        """Unnormalised probability density of last scattering at radius r."""
+    def T_obs(r, mu):
+        """Observer-frame temperature [K] including Doppler boost."""
+        return T_comoving(r) * doppler_factor(mu)
+
+    # -----------------------------------------------------------------------
+    # 11. Beloborodov (2011) probability density P(r, μ)
+    #     P(r, μ) ∝ D² · |dτ/dr| · exp(−τ)
+    #     In the coasting phase: τ(r) = r_ph/r, |dτ/dr| = r_ph/r²
+    #     ⇒  P(r, μ) ∝ D² · (r_ph/r²) · exp(−r_ph/r)
+    #     Beloborodov (2011), ApJ, 737, 68, Eq.(8)
+    #     Deng & Zhang (2014), Eq.(5)
+    # -----------------------------------------------------------------------
+    def P_beloborodov(r, mu):
+        """Beloborodov (2011) unnormalised probability density P(r, μ) at (r, μ)."""
         exponent = -r_ph / max(r, 1e-3 * r_ph)
         if not np.isfinite(exponent):
             return 0.0
-        return r_ph / r**2 * np.exp(exponent)
+        D = doppler_factor(mu)
+        return D**2 * r_ph / r**2 * np.exp(exponent)
 
     # -----------------------------------------------------------------------
-    # 11. Planck function (specific intensity) in the comoving frame
+    # 12. Planck function (specific intensity) in the OBSERVER frame
     #     B_ν(ν, T) = (2 h ν^3 / c^2) / (exp(h ν / k T) − 1)
+    #     Both ν and T are observer-frame quantities — no comoving transform.
     # -----------------------------------------------------------------------
     def planck_nu(nu, T):
-        """Planck specific intensity [erg/s/cm^2/Hz/sr]."""
+        """Planck specific intensity [erg/s/cm^2/Hz/sr] (observer-frame)."""
         if nu <= 0.0 or T <= 0.0:
             return 0.0
         x = H_PLANCK * nu / (K_BOLTZ * T)
@@ -168,37 +186,44 @@ def main():
         return (2.0 * H_PLANCK * nu**3 / C_LIGHT**2) / np.expm1(x)
 
     # -----------------------------------------------------------------------
-    # 12. Integrand for the δ-function-reduced single r-integral
-    #     integrand(r) = P(r) · B_ν(ν'(r), T'(r)) / r
-    #     The factor 1/r comes from the Jacobian |dt_obs/dμ|^{-1} = c(1+z)/r
-    #     of the δ-function transformation.
+    # 13. Integrand for the δ-function-reduced single r-integral
+    #     DZ14 Eq.7 with Beloborodov P(r,μ) and observer-frame T:
+    #
+    #     F_ν ∝ ∫_{r_min}^{r_max} dr  P(r, μ_r) · B_ν(ν, T_obs(r, μ_r)) / r
+    #
+    #     The factor 1/r comes from the Jacobian |∂t/∂μ|^{-1} = c/r
+    #     of the δ-function transformation (constant c absorbed into
+    #     the bolometric normalisation).
     # -----------------------------------------------------------------------
     def integrand(r, nu_obs):
-        """Integrand for the δ-reduced r-integral at frequency nu_obs [Hz]."""
+        """Integrand for the δ-reduced r-integral at observer frequency nu_obs [Hz]."""
         if r < r_min or r > r_max:
             return 0.0
-        nup = nu_comoving(r, nu_obs)
-        T_l = temperature_comoving(r)
-        P_r = P_last_scattering(r)
-        B = planck_nu(nup, T_l)
-        if B <= 0.0 or P_r <= 0.0:
+        mu = mu_r(r)
+        if mu < -1.0 or mu > 1.0:
             return 0.0
-        return P_r * B / r
+        Tobs = T_obs(r, mu)
+        P_val = P_beloborodov(r, mu)
+        B_val = planck_nu(nu_obs, Tobs)  # observer-frame ν and T directly
+        if B_val <= 0.0 or P_val <= 0.0:
+            return 0.0
+        return P_val * B_val / r
 
     # -----------------------------------------------------------------------
-    # 13. Frequency grid  (log-spaced, spanning the observable spectrum)
+    # 14. Frequency grid  (log-spaced, spanning the observable spectrum)
     # -----------------------------------------------------------------------
     N_POINTS = 500
-    nu_char_est = 2.0 * ETA * K_BOLTZ * T_ph / (H_PLANCK * (1.0 + REDSHIFT))
+    nu_char_est = 2.0 * ETA * K_BOLTZ * T_ph_comoving / H_PLANCK
     nu_min = nu_char_est * 1.0e-3
     nu_max = nu_char_est * 1.0e2
     nu_grid = np.logspace(np.log10(nu_min), np.log10(nu_max), N_POINTS)
 
     # -----------------------------------------------------------------------
-    # 14. Flux density calculation — numerical 1D integration
+    # 15. Flux density calculation — numerical 1D integration
     #     For each frequency, integrate over radius using scipy.integrate.quad.
     # -----------------------------------------------------------------------
-    print("# Computing δ-reduced single-integral photosphere spectrum ...",
+    print("# Computing DZ14 §3.1 photosphere spectrum "
+          "(Beloborodov P(r,μ), observer-frame T) ...",
           flush=True)
 
     f_nu_raw = np.zeros(N_POINTS)
@@ -209,36 +234,36 @@ def main():
 
     # -- Normalisation -----------------------------------------------------
     # Scale the raw integral so that the bolometric flux matches the
-    # isotropic equivalent luminosity: ∫ F_ν dν ≈ L_ISO/(4π d_L² (1+z)).
+    # isotropic equivalent luminosity: ∫ F_ν dν ≈ L_ISO/(4π d_L²)
+    # (z = 0, no (1+z) factor in the bolometric flux formula).
     bol_raw = _trapz(f_nu_raw, nu_grid)
-    F_bol_expected = L_ISO / (4.0 * np.pi * D_LUM**2 * (1.0 + REDSHIFT))
+    F_bol_expected = L_ISO / (4.0 * np.pi * D_LUM**2)
     norm_factor = F_bol_expected / bol_raw if bol_raw > 0 else 1.0
 
     f_nu_cgs = f_nu_raw * norm_factor
     f_nu_mjy = f_nu_cgs / MJY_TO_CGS
 
     # -----------------------------------------------------------------------
-    # 15. Characteristic frequency from the integrated spectrum (peak of F_ν)
+    # 16. Characteristic frequency from the integrated spectrum (peak of F_ν)
     # -----------------------------------------------------------------------
     idx_peak = np.argmax(f_nu_mjy)
     nu_char = nu_grid[idx_peak]
 
     # -----------------------------------------------------------------------
-    # 16. Print two-column output: frequency (Hz)  F_nu (mJy)
+    # 17. Print two-column output: frequency (Hz)  F_nu (mJy)
     # -----------------------------------------------------------------------
-    print("# photosphere_spectrum.py  —  Deng & Zhang (2014) δ-reduced "
-          "single-integral model")
+    print("# photosphere_spectrum.py  —  DZ14 §3.1 Beloborodov (2011) model")
     print("# frequency (Hz)    F_nu (mJy)")
     for nu, fnu in zip(nu_grid, f_nu_mjy):
         print(f"{nu:.6e}  {fnu:.6e}")
 
     # -----------------------------------------------------------------------
-    # 17. Plot log-log spectrum and save as photosphere_spectrum.png
+    # 18. Plot log-log spectrum and save as photosphere_spectrum.png
     # -----------------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(8, 5))
 
     ax.loglog(nu_grid, f_nu_mjy, "b-", linewidth=1.2,
-              label="δ-reduced photosphere spectrum")
+              label="DZ14 §3.1: Beloborodov P(r,μ), obs-frame T")
 
     ax.axvline(nu_char, color="red", linestyle="--", alpha=0.6,
                label=f"ν_peak ≈ {nu_char:.2e} Hz")
@@ -246,8 +271,8 @@ def main():
     ax.set_xlabel("Frequency ν [Hz]", fontsize=12)
     ax.set_ylabel("Flux density F_ν [mJy]", fontsize=12)
     ax.set_title("Photosphere Radiation Spectrum\n"
-                 "Deng & Zhang (2014): δ-Reduced Single Integral "
-                 "(Impulsive Injection, ∞ Boundary, Blackbody Photons)",
+                 "Deng & Zhang (2014) §3.1: Beloborodov P(r,μ) + Observer-Frame Temperature\n"
+                 "(z=0, Impulsive Injection, ∞ Boundary, Blackbody Photons)",
                  fontsize=11)
     ax.legend(fontsize=9)
     ax.grid(True, which="both", alpha=0.25)
@@ -257,7 +282,7 @@ def main():
     plt.close(fig)
 
     # -----------------------------------------------------------------------
-    # 18. Summary diagnostics (printed to stderr so stdout stays clean)
+    # 19. Summary diagnostics (printed to stderr so stdout stays clean)
     # -----------------------------------------------------------------------
     print(f"Photosphere radius:        r_ph = {r_ph:.3e} cm",
           file=sys.stderr)
@@ -267,12 +292,16 @@ def main():
           file=sys.stderr)
     print(f"Shell speed:               β    = {beta:.6f}",
           file=sys.stderr)
+    print(f"Lorentz factor:            Γ    = {ETA:.1f}",
+          file=sys.stderr)
     print(f"Observer time:             t_obs = {t_obs:.3e} s",
           file=sys.stderr)
     print(f"Integration limits:        r ∈ [{r_min:.3e}, {r_max:.3e}] cm",
           file=sys.stderr)
-    print(f"Comoving temperature:      T'_ph = {T_ph:.3e} K  "
-          f"({K_BOLTZ * T_ph / 1.602e-9:.2f} keV)",
+    print(f"Comoving temperature:      T'_ph = {T_ph_comoving:.3e} K  "
+          f"({K_BOLTZ * T_ph_comoving / 1.602e-9:.2f} keV)",
+          file=sys.stderr)
+    print(f"Redshift:                  z = {REDSHIFT}  (DZ14 §3.1 ignores redshift)",
           file=sys.stderr)
     print(f"Peak frequency:            ν_peak = {nu_char:.3e} Hz  "
           f"({H_PLANCK * nu_char / 1.602e-9:.2f} keV)",
@@ -282,6 +311,19 @@ def main():
           file=sys.stderr)
     print("Spectrum plot saved to photosphere_spectrum.png",
           file=sys.stderr)
+
+    # -----------------------------------------------------------------------
+    # 20. Modification summary
+    # -----------------------------------------------------------------------
+    print("\n# === Modification Summary ===", file=sys.stderr)
+    print("# 1. P(r,μ): Beloborodov (2011) D^2 · (r_ph/r^2) · exp(-r_ph/r) "
+          "(was: simple r_ph/r^2 · exp(-r_ph/r))", file=sys.stderr)
+    print("# 2. Temperature: observer-frame T_obs = T_comoving · D(μ) "
+          "(was: comoving T in Planck)", file=sys.stderr)
+    print("# 3. Frequency: observer-frame ν directly in Planck "
+          "(was: comoving ν' transformed)", file=sys.stderr)
+    print("# 4. Redshift: z = 0 (was: z = 1.0); all (1+z) factors removed "
+          "per DZ14 §3.1", file=sys.stderr)
 
 
 if __name__ == "__main__":
