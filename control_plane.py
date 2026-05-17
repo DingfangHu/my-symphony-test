@@ -2,14 +2,39 @@
 
 Manages the task queue and dispatches scheduled tasks to the runtime for actual
 execution.  The control-plane owns "what" and "when"; the runtime owns "how".
+
+The control-plane depends on the ``RuntimeInterface`` protocol rather than a
+concrete runtime implementation.  This lets callers swap in alternative runtimes
+for testing or extension.
 """
 
 from typing import Any, Callable, Dict, List
+
+from runtime_interface import RuntimeInterface
 
 import runtime as rt
 
 
 _schedule: List[str] = []
+
+# The runtime binding used by schedule() and dispatch().
+# Defaults to the built-in ``runtime`` module but can be swapped via set_runtime().
+_runtime: RuntimeInterface = rt
+
+
+def set_runtime(impl: RuntimeInterface) -> None:
+    """Replace the runtime implementation used for task execution.
+
+    Args:
+        impl: Any object satisfying the ``RuntimeInterface`` protocol.
+    """
+    global _runtime
+    _runtime = impl
+
+
+def get_runtime() -> RuntimeInterface:
+    """Return the currently bound runtime implementation."""
+    return _runtime
 
 
 def schedule(name: str, task_func: Callable[..., Any]) -> None:
@@ -29,7 +54,7 @@ def schedule(name: str, task_func: Callable[..., Any]) -> None:
     if not callable(task_func):
         raise ValueError("Task function must be callable.")
 
-    rt.register_task(name, task_func)
+    _runtime.register_task(name, task_func)
     _schedule.append(name)
 
 
@@ -50,7 +75,7 @@ def dispatch(*args: Any, **kwargs: Any) -> Dict[str, Any]:
     """
     results: Dict[str, Any] = {}
     for name in list(_schedule):
-        results[name] = rt.run_task(name, *args, **kwargs)
+        results[name] = _runtime.run_task(name, *args, **kwargs)
     return results
 
 

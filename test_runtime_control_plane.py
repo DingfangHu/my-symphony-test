@@ -11,11 +11,12 @@ import control_plane as cp
 def _reset_modules():
     """Reset mutable module state between tests.
 
-    Directly clears internal dicts/lists so each test starts from a
-    clean slate without re-importing.
+    Directly clears internal dicts/lists and restores the default runtime
+    binding so each test starts from a clean slate without re-importing.
     """
     rt._registry.clear()
     cp._schedule.clear()
+    cp.set_runtime(rt)
 
 
 # ---------------------------------------------------------------------------
